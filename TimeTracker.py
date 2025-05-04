@@ -55,11 +55,14 @@ class WebRemote:
         self.tracker = tracker
         self.app = Flask(__name__)
         self.app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
+        self.qr_window = None  # Здесь будем хранить ссылку на окно
         self.setup_routes()
         self.server_thread = None
         self.running = False
 
     def setup_routes(self):
+        """Настраивает маршруты Flask"""
+
         @self.app.route('/')
         def home():
             return """
@@ -148,6 +151,7 @@ class WebRemote:
             return jsonify({"status": "resumed"})
 
     def get_local_ip(self):
+        """Получает локальный IP-адрес"""
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             s.connect(('10.255.255.255', 1))
@@ -159,30 +163,50 @@ class WebRemote:
         return ip
 
     def generate_qr(self, url):
+        """Генерирует QR-код с указанным URL"""
         qr = qrcode.QRCode(version=1, box_size=10, border=5)
         qr.add_data(url)
         qr.make(fit=True)
         return qr.make_image(fill_color="black", back_color="white")
 
     def show_qr_window(self):
+        """Показывает окно с QR-кодом (создает новое при необходимости)"""
+        if self.qr_window is not None and self.qr_window.winfo_exists():
+            # Если окно уже существует - просто поднимаем его
+            self.qr_window.lift()
+            self.qr_window.focus_force()
+            return
+
+        # Создаем новое окно
         ip = self.get_local_ip()
         url = f"http://{ip}:5000"
         qr_img = self.generate_qr(url)
 
-        qr_window = tk.Toplevel(self.tracker.root)
-        qr_window.title("Подключите телефон")
+        self.qr_window = tk.Toplevel(self.tracker.root)
+        self.qr_window.title("Подключите телефон")
 
+        # Обработчик закрытия окна
+        self.qr_window.protocol("WM_DELETE_WINDOW", self.close_qr_window)
+
+        # Создаем и отображаем QR-код
         bio = io.BytesIO()
         qr_img.save(bio, format="PNG")
         img = tk.PhotoImage(data=bio.getvalue())
 
-        label = tk.Label(qr_window, image=img)
-        label.image = img
+        label = tk.Label(self.qr_window, image=img)
+        label.image = img  # сохраняем ссылку!
         label.pack()
 
-        tk.Label(qr_window, text=f"Адрес: {url}").pack()
+        tk.Label(self.qr_window, text=f"Адрес: {url}").pack()
+
+    def close_qr_window(self):
+        """Корректно закрывает окно QR-кода"""
+        if self.qr_window is not None:
+            self.qr_window.destroy()
+            self.qr_window = None
 
     def start_server(self):
+        """Запускает сервер удаленного управления"""
         if not self.running:
             try:
                 self.server_thread = threading.Thread(
@@ -192,7 +216,6 @@ class WebRemote:
                 )
                 self.server_thread.start()
                 self.running = True
-                self.show_qr_window()
             except Exception as e:
                 raise RuntimeError(f"Ошибка запуска сервера: {str(e)}")
 
@@ -1575,10 +1598,16 @@ class TimeTracker:
 
     def start_remote_server(self):
         """Запуск удалённого управления (для кнопки)"""
-        if not hasattr(self, 'remote') or self.remote is None:
-            self.remote = WebRemote(self)  # Инициализация при первом вызове
         try:
-            self.remote.start_server()
+            if not hasattr(self, 'remote') or self.remote is None:
+                self.remote = WebRemote(self)
+
+            if not self.remote.running:
+                self.remote.start_server()
+
+            # Всегда показываем окно при нажатии кнопки
+            self.remote.show_qr_window()
+
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось запустить сервер:\n{str(e)}")
 
