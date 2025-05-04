@@ -404,28 +404,36 @@ class TimeTracker:
         return f"{seconds // 3600:02}:{(seconds % 3600) // 60:02}:{seconds % 60:02}"
 
     def update_time(self):
-        if self.running_task and not self.paused:
-            elapsed = int((datetime.now() - self.running_task['start_time']).total_seconds())
-            current_total = self.total_time + elapsed
+        try:
+            if self.running_task and not self.paused:
+                # Проверяем, существует ли задача в БД
+                self.c.execute("SELECT 1 FROM tasks WHERE id=?", (self.running_task['id'],))
+                if not self.c.fetchone():
+                    self.running_task = None
+                    self.root.title("Work Time Tracker")
+                    return
 
-            # Обновляем заголовок
-            self.update_title()
+                elapsed = int((datetime.now() - self.running_task['start_time']).total_seconds())
+                current_total = self.total_time + elapsed
+                self.update_title()
 
-            # Обновляем задачу в списке
-            for item in self.tasks_list.get_children():
-                values = self.tasks_list.item(item)['values']
-                if values[0] == self.running_task['id']:
-                    total_task_time = self.get_task_time(self.running_task['id']) + elapsed
-                    self.tasks_list.item(item, values=(
-                        values[0],
-                        values[1],
-                        values[2],
-                        '▶ Активна',
-                        self.format_time(total_task_time)  # Общее время задачи
-                    ))
-                    break
-
-        self.root.after(1000, self.update_time)
+                # Обновляем задачу в списке
+                for item in self.tasks_list.get_children():
+                    values = self.tasks_list.item(item)['values']
+                    if values and values[0] == self.running_task['id']:
+                        total_task_time = self.get_task_time(self.running_task['id']) + elapsed
+                        self.tasks_list.item(item, values=(
+                            values[0],
+                            values[1],
+                            values[2],
+                            '▶ Активна',
+                            self.format_time(total_task_time)
+                        ))  # <- Здесь была пропущена закрывающая скобка
+                        break
+        except Exception as e:
+            print(f"Ошибка обновления времени: {e}")
+        finally:
+            self.root.after(1000, self.update_time)
 
     def get_task_time(self, task_id):
         """Возвращает сохранённое время задачи из БД"""
@@ -491,10 +499,24 @@ class TimeTracker:
 
     def finish_day(self):
         if messagebox.askokcancel("Завершение дня", "Экспортировать данные и завершить работу?"):
-            self.export_to_xlsx()
-            self.clear_day_data()
-            self.update_graph()  # Обновляем график после очистки данных
-            messagebox.showinfo("Успех", "Данные экспортированы и очищены")
+            try:
+                # Останавливаем все таймеры перед экспортом
+                if self.running_task:
+                    elapsed = int((datetime.now() - self.running_task['start_time']).total_seconds())
+                    self.update_task_time(self.running_task['id'], elapsed)
+                    self.total_time += elapsed
+                    self.running_task = None
+
+                self.export_to_xlsx()
+                self.clear_day_data()
+                self.update_graph()
+                messagebox.showinfo("Успех", "Данные экспортированы и очищены")
+
+                # Сбрасываем заголовок
+                self.root.title("Work Time Tracker")
+
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Не удалось завершить день: {str(e)}")
 
     def export_to_xlsx(self):
         # Экспорт в Excel
@@ -793,14 +815,17 @@ class TimeTracker:
         self.update_graph()
 
     def safe_exit(self):
-        """Безопасное завершение программы"""
+        """Безопасное завершение программы с проверками"""
         try:
-            plt.close('all')  # Закрываем все фигуры matplotlib
+            plt.close('all')
             if hasattr(self, 'conn'):
                 self.conn.close()
-            if hasattr(self, 'tray_icon'):
-                self.tray_icon.stop()
-            self.root.quit()  # Корректное завершение mainloop
+            if hasattr(self, 'tray_icon') and self.tray_icon:
+                try:
+                    self.tray_icon.stop()
+                except:
+                    pass
+            self.root.quit()
         except Exception as e:
             print(f"Ошибка при завершении: {e}")
         finally:
@@ -997,24 +1022,33 @@ class TimeTracker:
             self.dark_mode = False
 
     def update_title(self):
-        """Обновляет заголовок окна с полными названиями задач"""
+        """Обновляет заголовок окна с проверкой на существование задачи"""
         if self.running_task and not self.paused:
-            elapsed = int((datetime.now() - self.running_task['start_time']).total_seconds())
+            try:
+                # Получаем данные задачи с проверкой
+                self.c.execute("SELECT regress, name FROM tasks WHERE id=?", (self.running_task['id'],))
+                result = self.c.fetchone()
 
-            # Получаем полные данные задачи без обрезки
-            self.c.execute("SELECT regress, name FROM tasks WHERE id=?", (self.running_task['id'],))
-            regress, name = self.c.fetchone()
+                if not result:  # Если задача не найдена
+                    self.running_task = None
+                    self.root.title("Work Time Tracker")
+                    return
 
-            total_task_time = self.get_task_time(self.running_task['id']) + elapsed
+                regress, name = result
+                elapsed = int((datetime.now() - self.running_task['start_time']).total_seconds())
+                total_task_time = self.get_task_time(self.running_task['id']) + elapsed
 
-            self.root.title(
-                self.title_template.format(
-                    regress=regress,  # Полное название регресса
-                    name=name,  # Полное название задачи
-                    time=self.format_time(total_task_time),
-                    total=self.format_time(self.total_time + elapsed)
+                self.root.title(
+                    self.title_template.format(
+                        regress=regress,
+                        name=name,
+                        time=self.format_time(total_task_time),
+                        total=self.format_time(self.total_time + elapsed)
+                    )
                 )
-            )
+            except Exception as e:
+                print(f"Ошибка обновления заголовка: {e}")
+                self.root.title("Work Time Tracker")
         elif self.paused:
             self.root.title("Work Time Tracker (⏸)")
         else:
