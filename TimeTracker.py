@@ -1,3 +1,10 @@
+from flask import Flask, jsonify, request
+import threading
+import socket
+from PIL import Image, ImageDraw
+import io
+import qrcode
+
 from tkinter import Toplevel, Label
 import threading
 import matplotlib
@@ -16,6 +23,178 @@ import pystray
 from PIL import Image
 import sys
 from matplotlib import patheffects
+
+class Database:
+    def __init__(self, db_file):
+        self.db_file = db_file
+        self.conn = None
+        self.lock = threading.Lock()
+
+    def get_connection(self):
+        if self.conn is None:
+            self.conn = sqlite3.connect(
+                self.db_file,
+                check_same_thread=False
+            )
+            self.conn.row_factory = sqlite3.Row
+        return self.conn
+
+    def execute(self, query, args=()):
+        with self.lock:
+            cursor = self.get_connection().cursor()
+            cursor.execute(query, args)
+            self.conn.commit()
+            return cursor
+
+    def close(self):
+        if self.conn:
+            self.conn.close()
+
+class WebRemote:
+    def __init__(self, tracker):
+        self.tracker = tracker
+        self.app = Flask(__name__)
+        self.app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
+        self.setup_routes()
+        self.server_thread = None
+        self.running = False
+
+    def setup_routes(self):
+        @self.app.route('/')
+        def home():
+            return """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style>
+                    body { font-family: Arial; text-align: center; margin: 20px; }
+                    button { 
+                        background: #4CAF50; 
+                        color: white; 
+                        border: none; 
+                        padding: 10px 20px;
+                        margin: 5px;
+                        font-size: 16px;
+                        cursor: pointer;
+                        border-radius: 5px;
+                    }
+                    #tasks { margin: 20px 0; }
+                    .task { padding: 10px; border-bottom: 1px solid #ddd; }
+                </style>
+            </head>
+            <body>
+                <h1>Time Tracker Remote</h1>
+                <div id="tasks">Loading tasks...</div>
+                <button onclick="pause()">⏸ Pause</button>
+                <button onclick="resume()">▶ Resume</button>
+
+                <script>
+                    function loadTasks() {
+                        fetch('/tasks')
+                            .then(r => r.json())
+                            .then(tasks => {
+                                let html = '';
+                                tasks.forEach(task => {
+                                    html += `<div class="task">
+                                        <button onclick="startTask(${task.id})">
+                                            ${task.title} (${task.time})
+                                        </button>
+                                    </div>`;
+                                });
+                                document.getElementById('tasks').innerHTML = html;
+                            });
+                    }
+
+                    function startTask(id) {
+                        fetch(`/start_task/${id}`).then(loadTasks);
+                    }
+
+                    function pause() {
+                        fetch('/pause').then(() => alert('Paused'));
+                    }
+
+                    function resume() {
+                        fetch('/resume').then(() => alert('Resumed'));
+                    }
+
+                    // Load tasks on start
+                    loadTasks();
+                    // Refresh every 5 seconds
+                    setInterval(loadTasks, 5000);
+                </script>
+            </body>
+            </html>
+            """
+
+        @self.app.route('/tasks')
+        def get_tasks():
+            tasks = self.tracker.get_all_tasks()
+            return jsonify(tasks)
+
+        @self.app.route('/start_task/<int:task_id>')
+        def start_task(task_id):
+            self.tracker.start_task_timer(task_id)
+            return jsonify({"status": "ok"})
+
+        @self.app.route('/pause')
+        def pause():
+            self.tracker.pause_all()
+            return jsonify({"status": "paused"})
+
+        @self.app.route('/resume')
+        def resume():
+            self.tracker.resume_all()
+            return jsonify({"status": "resumed"})
+
+    def get_local_ip(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(('10.255.255.255', 1))
+            ip = s.getsockname()[0]
+        except Exception:
+            ip = '127.0.0.1'
+        finally:
+            s.close()
+        return ip
+
+    def generate_qr(self, url):
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(url)
+        qr.make(fit=True)
+        return qr.make_image(fill_color="black", back_color="white")
+
+    def show_qr_window(self):
+        ip = self.get_local_ip()
+        url = f"http://{ip}:5000"
+        qr_img = self.generate_qr(url)
+
+        qr_window = tk.Toplevel(self.tracker.root)
+        qr_window.title("Подключите телефон")
+
+        bio = io.BytesIO()
+        qr_img.save(bio, format="PNG")
+        img = tk.PhotoImage(data=bio.getvalue())
+
+        label = tk.Label(qr_window, image=img)
+        label.image = img
+        label.pack()
+
+        tk.Label(qr_window, text=f"Адрес: {url}").pack()
+
+    def start_server(self):
+        if not self.running:
+            try:
+                self.server_thread = threading.Thread(
+                    target=self.app.run,
+                    kwargs={'host': '0.0.0.0'},
+                    daemon=True
+                )
+                self.server_thread.start()
+                self.running = True
+                self.show_qr_window()
+            except Exception as e:
+                raise RuntimeError(f"Ошибка запуска сервера: {str(e)}")
 
 class TimeTracker:
     def __init__(self, root):
@@ -67,20 +246,30 @@ class TimeTracker:
         self.paused_task_time = 0
         self.title_template = "{regress} | {name} | {time} | Всего: {total}"
         self.tooltips = {}
-        self.setup_clipboard_bindings()  # Включение вставки через Ctrl+V
+        self.setup_clipboard_bindings()
+        self.remote = None
 
     def setup_db(self):
-        self.conn = sqlite3.connect('timetracker.db')
-        self.c = self.conn.cursor()
-        self.c.execute('''CREATE TABLE IF NOT EXISTS tasks
-                         (id INTEGER PRIMARY KEY,
-                          date TEXT,
-                          login TEXT,
-                          regress TEXT,
-                          name TEXT,
-                          link TEXT,
-                          time INTEGER)''')
-        self.conn.commit()
+        self.db = Database('timetracker.db')
+        self.db.execute('''CREATE TABLE IF NOT EXISTS tasks
+                           (
+                               id
+                               INTEGER
+                               PRIMARY
+                               KEY,
+                               date
+                               TEXT,
+                               login
+                               TEXT,
+                               regress
+                               TEXT,
+                               name
+                               TEXT,
+                               link
+                               TEXT,
+                               time
+                               INTEGER
+                           )''')
 
     def setup_stats_tab(self):
         """Настраивает вкладку статистики"""
@@ -112,6 +301,13 @@ class TimeTracker:
         # Верхняя панель с элементами управления
         top_panel = ttk.Frame(tracking_frame, padding=(5, 5, 5, 5))
         top_panel.pack(fill=tk.X)
+
+        ttk.Button(
+            top_panel,
+            text="📱 Удалённое управление",
+            command=self.start_remote_server,
+            style="Bordered.TButton"
+        ).pack(side=tk.RIGHT, padx=5)
 
         # Общее время в верхней панели
         self.total_time_label = ttk.Label(top_panel,
@@ -308,14 +504,14 @@ class TimeTracker:
         )
 
         try:
-            self.c.execute("INSERT INTO tasks (date, login, regress, name, link, time) VALUES (?,?,?,?,?,?)", data)
-            new_id = self.c.lastrowid
+            cursor = self.db.execute("INSERT INTO tasks (date, login, regress, name, link, time) VALUES (?,?,?,?,?,?)",
+                                     data)
+            new_id = cursor.lastrowid
 
             if self.extra_time.get():
-                self.c.execute("INSERT INTO tasks (date, login, regress, name, link, time) VALUES (?,?,?,?,?,?)",
-                               (data[0], data[1], data[2], "[ДОП] " + data[3], data[4], 0))
+                self.db.execute("INSERT INTO tasks (date, login, regress, name, link, time) VALUES (?,?,?,?,?,?)",
+                                (data[0], data[1], data[2], "[ДОП] " + data[3], data[4], 0))
 
-            self.conn.commit()
             self.update_tasks()
             self.clear_task_fields()
             self.start_task_timer(new_id)
@@ -330,6 +526,8 @@ class TimeTracker:
             elapsed = int((datetime.now() - self.running_task['start_time']).total_seconds())
             self.update_task_time(self.running_task['id'], elapsed)
             self.total_time += elapsed
+
+        # Обновляем время старта
         self.running_task = {'id': task_id, 'start_time': datetime.now()}
         self.paused = False
         self.update_tasks()
@@ -354,19 +552,19 @@ class TimeTracker:
                 if hasattr(self, 'paused_task_id') and self.paused_task_id == task_id:
                     self.paused_task_id = None
                     # Пытаемся найти другую задачу для продолжения
-                    self.c.execute("SELECT id FROM tasks WHERE date=? AND id!=? LIMIT 1",
-                                   (datetime.now().strftime("%d.%m.%Y"), task_id))
-                    result = self.c.fetchone()
+                    cursor = self.db.execute("SELECT id FROM tasks WHERE date=? AND id!=? LIMIT 1",
+                                             (datetime.now().strftime("%d.%m.%Y"), task_id))
+                    result = cursor.fetchone()
                     if result:
                         self.paused_task_id = result[0]
 
                 # Получаем время задачи перед удалением
-                self.c.execute("SELECT time FROM tasks WHERE id=?", (task_id,))
-                task_time = self.c.fetchone()[0]
+                cursor = self.db.execute("SELECT time FROM tasks WHERE id=?", (task_id,))
+                result = cursor.fetchone()
+                task_time = result[0] if result else 0
 
                 # Удаляем задачу
-                self.c.execute("DELETE FROM tasks WHERE id=?", (task_id,))
-                self.conn.commit()
+                self.db.execute("DELETE FROM tasks WHERE id=?", (task_id,))
 
                 # Обновляем общее время
                 self.total_time -= task_time
@@ -378,14 +576,16 @@ class TimeTracker:
                 messagebox.showerror("Ошибка удаления", str(e))
 
     def update_tasks(self):
-        # Обновление списка задач
+        """Обновление списка задач"""
         for item in self.tasks_list.get_children():
             self.tasks_list.delete(item)
 
         try:
-            self.c.execute("SELECT id, regress, name, time FROM tasks WHERE date=?",
-                           (datetime.now().strftime("%d.%m.%Y"),))
-            tasks = self.c.fetchall()
+            cursor = self.db.execute(
+                "SELECT id, regress, name, time FROM tasks WHERE date=?",
+                (datetime.now().strftime("%d.%m.%Y"),)  # Здесь была ошибка - пропущена запятая
+            )
+            tasks = cursor.fetchall()
 
             for row in tasks:
                 task_id, regress, name, time = row
@@ -405,12 +605,10 @@ class TimeTracker:
                     self.format_time(time)
                 ))
 
-            # Обновляем paused_task_id если есть задачи
             if tasks and not self.running_task:
                 self.paused_task_id = tasks[0][0]
-
         except Exception as e:
-            messagebox.showerror("Ошибка обновления", str(e))
+            messagebox.showerror("Ошибка обновления", f"Не удалось загрузить задачи: {str(e)}")
 
     def on_task_select(self, event):
         """Обработчик выбора задачи в списке"""
@@ -426,8 +624,8 @@ class TimeTracker:
         try:
             if self.running_task and not self.paused:
                 # Проверяем, существует ли задача в БД
-                self.c.execute("SELECT 1 FROM tasks WHERE id=?", (self.running_task['id'],))
-                if not self.c.fetchone():
+                cursor = self.db.execute("SELECT 1 FROM tasks WHERE id=?", (self.running_task['id'],))
+                if not cursor.fetchone():
                     self.running_task = None
                     self.root.title("Work Time Tracker")
                     return
@@ -447,7 +645,7 @@ class TimeTracker:
                             values[2],
                             '▶ Активна',
                             self.format_time(total_task_time)
-                        ))  # <- Здесь была пропущена закрывающая скобка
+                        ))
                         break
         except Exception as e:
             print(f"Ошибка обновления времени: {e}")
@@ -456,9 +654,13 @@ class TimeTracker:
 
     def get_task_time(self, task_id):
         """Возвращает сохранённое время задачи из БД"""
-        self.c.execute("SELECT time FROM tasks WHERE id=?", (task_id,))
-        result = self.c.fetchone()
-        return result[0] if result else 0
+        try:
+            cursor = self.db.execute("SELECT time FROM tasks WHERE id=?", (task_id,))
+            result = cursor.fetchone()
+            return result[0] if result else 0
+        except Exception as e:
+            print(f"Ошибка получения времени задачи: {e}")
+            return 0
 
     def pause_all(self):
         """Остановка всех таймеров по кнопке"""
@@ -513,12 +715,18 @@ class TimeTracker:
         self.update_title()
 
     def update_total_time(self):
-        # Обновление общего времени
-        self.c.execute("SELECT SUM(time) FROM tasks WHERE date=?",
-                       (datetime.now().strftime("%d.%m.%Y"),))
-        total = self.c.fetchone()[0] or 0
-        self.total_time = total
-        self.total_time_label.config(text=f"Общее время: {self.format_time(total)}")
+        """Обновление общего времени"""
+        try:
+            cursor = self.db.execute(
+                "SELECT SUM(time) FROM tasks WHERE date=?",
+                (datetime.now().strftime("%d.%m.%Y"),)
+            )
+            result = cursor.fetchone()
+            total = result[0] if result[0] is not None else 0
+            self.total_time = total
+            self.total_time_label.config(text=f"Общее время: {self.format_time(total)}")
+        except Exception as e:
+            print(f"Ошибка обновления общего времени: {e}")
 
     def finish_day(self):
         if messagebox.askokcancel("Завершение дня", "Экспортировать данные и завершить работу?"):
@@ -544,8 +752,8 @@ class TimeTracker:
     def export_to_xlsx(self):
         # Экспорт в Excel
         today = datetime.now().strftime("%d.%m.%Y")
-        self.c.execute("SELECT date, login, regress, name, link, time FROM tasks WHERE date=?", (today,))
-        data = self.c.fetchall()
+        cursor = self.db.execute("SELECT date, login, regress, name, link, time FROM tasks WHERE date=?", (today,))
+        data = cursor.fetchall()
 
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -569,8 +777,7 @@ class TimeTracker:
 
     def clear_day_data(self):
         # Очистка данных за день после экспорта
-        self.c.execute("DELETE FROM tasks WHERE date=?", (datetime.now().strftime("%d.%m.%Y"),))
-        self.conn.commit()
+        self.db.execute("DELETE FROM tasks WHERE date=?", (datetime.now().strftime("%d.%m.%Y"),))
         self.total_time = 0
         self.update_tasks()
         self.update_total_time()
@@ -628,13 +835,13 @@ class TimeTracker:
 
     def update_task_time(self, task_id, seconds):
         # Обновление времени задачи в БД
-        self.c.execute("UPDATE tasks SET time = time + ? WHERE id=?", (seconds, task_id))
-        self.conn.commit()
+        self.db.execute("UPDATE tasks SET time = time + ? WHERE id=?", (seconds, task_id))
 
     def task_exists(self, task_id):
         """Проверяет, существует ли задача с указанным ID"""
-        self.c.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,))
-        return bool(self.c.fetchone())
+        cursor = self.db.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,))
+        result = cursor.fetchone()
+        return bool(result)
 
     def edit_task(self):
         selected = self.tasks_list.selection()
@@ -642,13 +849,14 @@ class TimeTracker:
             return
 
         task_id = self.tasks_list.item(selected[0])['values'][0]
-
-        # Проверяем, активна ли выбранная задача
         is_active = self.running_task and self.running_task['id'] == task_id
 
         # Получаем текущие данные задачи (кроме времени)
-        self.c.execute("SELECT regress, name, link FROM tasks WHERE id=?", (task_id,))
-        regress, name, link = self.c.fetchone()
+        cursor = self.db.execute("SELECT regress, name, link FROM tasks WHERE id=?", (task_id,))
+        result = cursor.fetchone()
+        if not result:
+            return
+        regress, name, link = result
 
         # Создаем окно редактирования
         edit_win = tk.Toplevel(self.root)
@@ -696,14 +904,13 @@ class TimeTracker:
                     self.total_time += int(elapsed)
 
                 # Обновляем данные задачи
-                self.c.execute("""
-                               UPDATE tasks
-                               SET regress = ?,
-                                   name    = ?,
-                                   link    = ?
-                               WHERE id = ?
-                               """, (new_regress, new_name, new_link, task_id))
-                self.conn.commit()
+                self.db.execute("""
+                                UPDATE tasks
+                                SET regress = ?,
+                                    name    = ?,
+                                    link    = ?
+                                WHERE id = ?
+                                """, (new_regress, new_name, new_link, task_id))
 
                 # Если задача была активна, возобновляем таймер
                 if is_active:
@@ -777,8 +984,8 @@ class TimeTracker:
                                  facecolor=bg_color)
 
             # Получаем данные
-            self.c.execute("SELECT name, SUM(time) FROM tasks GROUP BY name")
-            data = self.c.fetchall()
+            cursor = self.db.execute("SELECT name, SUM(time) FROM tasks GROUP BY name")
+            data = cursor.fetchall()
 
             if not data:
                 ax.text(0.5, 0.5, "Нет данных для отображения",
@@ -838,16 +1045,12 @@ class TimeTracker:
         self.update_graph()
 
     def safe_exit(self):
-        """Безопасное завершение программы с проверками"""
+        """Безопасное завершение программы"""
         try:
-            plt.close('all')
-            if hasattr(self, 'conn'):
-                self.conn.close()
+            if hasattr(self, 'db'):
+                self.db.close()
             if hasattr(self, 'tray_icon') and self.tray_icon:
-                try:
-                    self.tray_icon.stop()
-                except:
-                    pass
+                self.tray_icon.stop()
             self.root.quit()
         except Exception as e:
             print(f"Ошибка при завершении: {e}")
@@ -1008,8 +1211,8 @@ class TimeTracker:
         if self.running_task and not self.paused:
             try:
                 # Получаем данные задачи с проверкой
-                self.c.execute("SELECT regress, name FROM tasks WHERE id=?", (self.running_task['id'],))
-                result = self.c.fetchone()
+                cursor = self.db.execute("SELECT regress, name FROM tasks WHERE id=?", (self.running_task['id'],))
+                result = cursor.fetchone()
 
                 if not result:  # Если задача не найдена
                     self.running_task = None
@@ -1038,14 +1241,14 @@ class TimeTracker:
 
     def get_task_name(self, task_id):
         """Возвращает название задачи по ID"""
-        self.c.execute("SELECT name FROM tasks WHERE id=?", (task_id,))
-        result = self.c.fetchone()
+        cursor = self.db.execute("SELECT name FROM tasks WHERE id=?", (task_id,))
+        result = cursor.fetchone()
         return result[0] if result else "Новая задача"
 
     def get_task_details(self, task_id):
         """Возвращает кортеж (regress, name) для задачи"""
-        self.c.execute("SELECT regress, name FROM tasks WHERE id=?", (task_id,))
-        return self.c.fetchone() or ("", "")
+        cursor = self.db.execute("SELECT regress, name FROM tasks WHERE id=?", (task_id,))
+        return cursor.fetchone() or ("", "")
 
     def focused_entry_event(self, event):
         """Генерирует событие для активного поля ввода"""
@@ -1205,8 +1408,8 @@ class TimeTracker:
         selected = self.tasks_list.selection()
         if selected:
             task_id = self.tasks_list.item(selected[0])['values'][0]
-            self.c.execute("SELECT link FROM tasks WHERE id=?", (task_id,))
-            result = self.c.fetchone()
+            cursor = self.db.execute("SELECT link FROM tasks WHERE id=?", (task_id,))
+            result = cursor.fetchone()
             if result and result[0]:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(result[0])
@@ -1250,9 +1453,9 @@ class TimeTracker:
         """Проверяет есть ли задачи для продолжения при запуске"""
         if not self.running_task:
             try:
-                self.c.execute("SELECT id FROM tasks WHERE date=? LIMIT 1",
-                               (datetime.now().strftime("%d.%m.%Y"),))
-                result = self.c.fetchone()
+                cursor = self.db.execute("SELECT id FROM tasks WHERE date=? LIMIT 1",
+                                         (datetime.now().strftime("%d.%m.%Y"),))
+                result = cursor.fetchone()
                 if result:
                     self.paused_task_id = result[0]
             except Exception as e:
@@ -1353,6 +1556,31 @@ class TimeTracker:
         # Применяем ко всем Entry виджетам
         for entry in [self.login_entry, self.regress_entry, self.name_entry, self.link_entry]:
             bind_shortcuts(entry)
+
+    def get_all_tasks(self):
+        """Возвращает список задач в формате JSON"""
+        cursor = self.db.execute(
+            "SELECT id, regress, name, time FROM tasks WHERE date=?",
+            (datetime.now().strftime("%d.%m.%Y"),)
+        )
+
+        tasks = []
+        for row in cursor.fetchall():
+            tasks.append({
+                "id": row[0],
+                "title": f"{row[1]} - {row[2]}",
+                "time": self.format_time(row[3])
+            })
+        return tasks
+
+    def start_remote_server(self):
+        """Запуск удалённого управления (для кнопки)"""
+        if not hasattr(self, 'remote') or self.remote is None:
+            self.remote = WebRemote(self)  # Инициализация при первом вызове
+        try:
+            self.remote.start_server()
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось запустить сервер:\n{str(e)}")
 
 if __name__ == "__main__":
     root = tk.Tk()
