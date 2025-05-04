@@ -53,6 +53,7 @@ class TimeTracker:
         self.setup_ui()
         self.setup_task_context_menu()
         self.setup_tray()
+        self.setup_key_bindings()
         self.running_task = None
         self.paused = False
         self.paused_task_id = None
@@ -66,6 +67,7 @@ class TimeTracker:
         self.paused_task_time = 0
         self.title_template = "{regress} | {name} | {time} | Всего: {total}"
         self.tooltips = {}
+        self.setup_clipboard_bindings()  # Включение вставки через Ctrl+V
 
     def setup_db(self):
         self.conn = sqlite3.connect('timetracker.db')
@@ -117,7 +119,7 @@ class TimeTracker:
                                           font=('Arial', 10, 'bold'))
         self.total_time_label.pack(side=tk.LEFT, padx=10)
 
-        # Замените создание кнопки темы на:
+        # Кнопка темы
         colors = self.get_current_colors()
         self.theme_btn = tk.Button(top_panel,
                                    image=self.dark_icon if self.dark_mode else self.light_icon,
@@ -125,19 +127,16 @@ class TimeTracker:
                                    bd=0,
                                    highlightthickness=0,
                                    activebackground=colors['active_bg'],
-                                   background=colors['theme_btn_bg'],  # Используем специальный цвет
+                                   background=colors['theme_btn_bg'],
                                    relief="flat")
         self.theme_btn.pack(side=tk.RIGHT, padx=5)
-
-        # обновление фона панели
-        top_panel.configure(style='TFrame')  # Для ttk.Frame
 
         # Основной контент
         main_frame = ttk.Frame(tracking_frame, padding=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
         main_frame.grid_columnconfigure(1, weight=1)
 
-        # Поле логина (центрированное и выровненное)
+        # Поле логина (адаптивное)
         login_frame = ttk.Frame(main_frame)
         login_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         login_frame.grid_columnconfigure(1, weight=1)
@@ -147,12 +146,12 @@ class TimeTracker:
         self.login_entry.grid(row=0, column=1, sticky=tk.EW)
         self.add_placeholder(self.login_entry, "Введите ваш логин")
 
-        # Форма задачи с увеличенными отступами
+        # Форма задачи
         task_frame = ttk.LabelFrame(main_frame, text="Новая задача", padding=10)
         task_frame.grid(row=1, column=0, columnspan=2, pady=5, sticky=tk.EW)
         task_frame.grid_columnconfigure(1, weight=1)
 
-        # Увеличиваем отступы между полями (pady)
+        # Поля ввода (адаптивные)
         ttk.Label(task_frame, text="Регресс:").grid(row=0, column=0, sticky=tk.W, pady=(0, 7))
         self.regress_entry = ttk.Entry(task_frame)
         self.regress_entry.grid(row=0, column=1, padx=10, sticky=tk.EW, pady=(0, 7))
@@ -168,30 +167,50 @@ class TimeTracker:
         self.link_entry.grid(row=2, column=1, padx=10, sticky=tk.EW, pady=(7, 0))
         self.add_placeholder(self.link_entry, "Ссылка на тест-ран")
 
-        # Чекбокс и кнопки
+        # Чекбокс
         self.extra_time = tk.BooleanVar()
         ttk.Checkbutton(task_frame, text="Доп. время", variable=self.extra_time).grid(
             row=3, columnspan=2, pady=(10, 5))
 
-        # Фрейм для кнопок с отступами
+        # Кнопки (адаптивные)
         buttons_frame = ttk.Frame(task_frame)
         buttons_frame.grid(row=4, columnspan=2, pady=(5, 0), sticky=tk.EW)
         buttons_frame.grid_columnconfigure(0, weight=1)
         buttons_frame.grid_columnconfigure(1, weight=1)
 
-        # Кнопки с отступами между ними
-        add_btn = ttk.Button(buttons_frame, text="Добавить", command=self.add_task, style="Accent.TButton")
+        buttons_frame = ttk.Frame(task_frame)
+        buttons_frame.grid(row=4, columnspan=2, pady=(5, 0), sticky=tk.EW)
+        buttons_frame.grid_columnconfigure(0, weight=1)
+        buttons_frame.grid_columnconfigure(1, weight=1)
+
+        # Создаем стили для кнопок
+        self.style.configure('Bordered.TButton',
+                             relief='solid',
+                             borderwidth=1,
+                             padding=5)
+        self.style.configure('BorderedAccent.TButton',
+                             relief='solid',
+                             borderwidth=1,
+                             padding=5,
+                             font=('Arial', 9, 'bold'))
+
+        add_btn = ttk.Button(buttons_frame,
+                             text="Добавить",
+                             command=self.add_task,
+                             style='Bordered.TButton')
         add_btn.grid(row=0, column=0, padx=(0, 5), sticky=tk.EW)
 
-        finish_btn = ttk.Button(buttons_frame, text="Завершить день", command=self.finish_day, style="Accent.TButton")
+        finish_btn = ttk.Button(buttons_frame,
+                                text="Завершить день",
+                                command=self.finish_day,
+                                style='BorderedAccent.TButton')
         finish_btn.grid(row=0, column=1, padx=(5, 0), sticky=tk.EW)
 
         # Список задач
         self.tasks_list = ttk.Treeview(main_frame,
                                        columns=('id', 'regress', 'name', 'status', 'time'),
                                        show='headings',
-                                       height=12,
-                                       style="Treeview")
+                                       height=12)
         self.tasks_list.heading('id', text='ID')
         self.tasks_list.heading('regress', text='Регресс')
         self.tasks_list.heading('name', text='Название')
@@ -850,7 +869,6 @@ class TimeTracker:
             button_fg = "#E0E0E0"
             list_bg = "#252525"
             list_fg = "#FFFFFF"
-            list_alt_bg = "#2D2D2D"
             frame_bg = "#252525"
             label_fg = "#E0E0E0"
             separator_color = "#3A3A3A"
@@ -867,7 +885,6 @@ class TimeTracker:
             button_fg = "#000000"
             list_bg = "#FFFFFF"
             list_fg = "#000000"
-            list_alt_bg = "#F0F0F0"
             frame_bg = "#FFFFFF"
             label_fg = "#000000"
             separator_color = "#D0D0D0"
@@ -890,24 +907,19 @@ class TimeTracker:
         style.configure("TNotebook.Tab",
                         background=tab_bg,
                         foreground=tab_fg,
-                        padding=[10, 5],
-                        borderwidth=1)
+                        padding=[10, 5])
         style.map("TNotebook.Tab",
                   background=[("selected", tab_selected_bg)],
                   foreground=[("selected", tab_fg)])
 
-        # Настройки для Treeview (списка задач)
+        # Настройки для Treeview
         style.configure("Treeview",
                         background=list_bg,
                         foreground=list_fg,
-                        fieldbackground=list_bg,
-                        borderwidth=0,
-                        relief='flat')
+                        fieldbackground=list_bg)
         style.configure("Treeview.Heading",
                         background=button_bg,
-                        foreground=button_fg,
-                        borderwidth=1,
-                        relief='flat')
+                        foreground=button_fg)
         style.configure("Treeview.Separator",
                         background=separator_color)
 
@@ -919,11 +931,20 @@ class TimeTracker:
         style.configure("TButton",
                         background=button_bg,
                         foreground=button_fg,
-                        bordercolor=bg_color,
-                        borderwidth=1)
+                        padding=5)
         style.map("TButton",
-                  background=[('active', button_bg)],
-                  relief=[('active', 'flat'), ('!active', 'flat')])
+                  background=[('active', button_bg)])
+
+        # Стиль для кнопки "Завершить день"
+        if self.dark_mode:
+            finish_btn_fg = "#FFFFFF"  # Белый текст в темной теме
+        else:
+            finish_btn_fg = "#000000"  # Черный текст в светлой теме
+
+        style.configure("Accent.TButton",
+                        font=('Arial', 9, 'bold'),
+                        foreground=finish_btn_fg,
+                        padding=5)
 
         # Настройки для фреймов
         style.configure("TFrame", background=frame_bg)
@@ -933,77 +954,34 @@ class TimeTracker:
                         foreground=entry_fg,
                         insertcolor=fg_color)
 
+        if self.dark_mode:
+            self.style.map('Bordered.TButton',
+                           background=[('active', '#3A3A3A'), ('!active', '#333333')],
+                           foreground=[('active', '#E0E0E0'), ('!active', '#E0E0E0')],
+                           bordercolor=[('active', '#5D8AA8'), ('!active', '#3A3A3A')])
+
+            self.style.map('BorderedAccent.TButton',
+                           background=[('active', '#4A6987'), ('!active', '#3A3A3A')],
+                           foreground=[('active', '#FFFFFF'), ('!active', '#FFFFFF')],
+                           bordercolor=[('active', '#7EB6FF'), ('!active', '#4A6987')])
+        else:
+            self.style.map('Bordered.TButton',
+                           background=[('active', '#E0E0E0'), ('!active', '#F0F0F0')],
+                           foreground=[('active', '#000000'), ('!active', '#000000')],
+                           bordercolor=[('active', '#0078D7'), ('!active', '#D0D0D0')])
+
+            self.style.map('BorderedAccent.TButton',
+                           background=[('active', '#0078D7'), ('!active', '#E0E0E0')],
+                           foreground=[('active', '#FFFFFF'), ('!active', '#000000')],
+                           bordercolor=[('active', '#5D8AA8'), ('!active', '#0078D7')])
+
         # Применяем цвета ко всем виджетам
         self.root.config(bg=bg_color)
 
         # Обновляем график
         self.update_graph_theme()
 
-        # Принудительно обновляем стиль Treeview
-        if hasattr(self, 'tasks_list'):
-            self.tasks_list.config(style="Treeview")
-
-        # Настройки для всех кнопок
-        style.configure("TButton",
-                        padding=5,
-                        relief="flat",
-                        borderwidth=1)
-
-        style.map("TButton",
-                  background=[('active', button_bg)],
-                  relief=[('pressed', 'sunken'), ('!pressed', 'flat')])
-
-        # Стиль для заголовков столбцов
-        style.configure("Treeview.Heading",
-                        font=('Arial', 9, 'bold'),
-                        padding=(5, 3, 5, 3),
-                        relief="flat")
-
-        # Стиль для обычных кнопок
-        style.configure("Accent.TButton",
-                        font=('Arial', 9, 'bold'),
-                        padding=5,
-                        relief="flat")
-
-        # Границы для фреймов
-        style.configure("TLabelframe",
-                        borderwidth=1,
-                        relief="solid",
-                        padding=5)
-
-        style.configure("TLabelframe.Label",
-                        font=('Arial', 9, 'bold'))
-
-        style.configure("Treeview",
-                        borderwidth=1,
-                        relief="solid",
-                        rowheight=25)
-
-        style.configure("Treeview.Heading",
-                        borderwidth=1,
-                        relief="solid",
-                        padding=5)
-
-        style.configure("Treeview",
-                        background=list_bg,
-                        foreground=list_fg,
-                        fieldbackground=list_bg,
-                        borderwidth=1,
-                        relief="solid",
-                        rowheight=25)
-
-        style.configure("Treeview.Heading",
-                        background=button_bg,
-                        foreground=button_fg,
-                        borderwidth=1,
-                        relief="solid",
-                        padding=5,
-                        font=('Arial', 9, 'bold'))
-
-        style.map("Treeview.Heading",
-                  background=[('active', button_bg)],
-                  relief=[('pressed', 'sunken'), ('!pressed', 'solid')])
-
+        # Обновляем кнопку темы
         if hasattr(self, 'theme_btn'):
             self.update_theme_button()
 
@@ -1065,30 +1043,25 @@ class TimeTracker:
         self.c.execute("SELECT regress, name FROM tasks WHERE id=?", (task_id,))
         return self.c.fetchone() or ("", "")
 
+    def focused_entry_event(self, event):
+        """Генерирует событие для активного поля ввода"""
+        widget = self.root.focus_get()
+        if isinstance(widget, (ttk.Entry, tk.Entry)):
+            widget.event_generate(event)
+
     def setup_task_context_menu(self):
         """Создаёт контекстное меню для задач"""
         self.task_context_menu = tk.Menu(self.root, tearoff=0)
 
-        if self.dark_mode:
-            menu_bg = "#2D2D2D"
-            menu_fg = "#E0E0E0"
-            active_bg = "#2D5D7B"
-            active_fg = "#FFFFFF"
-        else:
-            menu_bg = "#F5F5F5"
-            menu_fg = "#000000"
-            active_bg = "#0078D7"
-            active_fg = "#FFFFFF"
+        colors = self.get_current_colors()
 
         self.task_context_menu.configure(
-            bg=menu_bg,
-            fg=menu_fg,
-            activebackground=active_bg,
-            activeforeground=active_fg,
-            selectcolor=active_bg
+            bg=colors['menu_bg'],
+            fg=colors['menu_fg'],
+            activebackground=colors['active_bg'],
+            activeforeground='white'
         )
 
-        # Элементы меню
         self.task_context_menu.add_command(
             label="Продолжить",
             command=self.resume_selected_task
@@ -1112,7 +1085,38 @@ class TimeTracker:
         )
 
         # Привязка к списку задач
-        self.tasks_list.bind("<Button-3>", self.show_context_menu)
+        self.tasks_list.bind("<Button-3>", self.show_task_context_menu)
+
+        # Контекстное меню для полей ввода
+        self.entry_menu = tk.Menu(self.root, tearoff=0)
+        self.entry_menu.configure(
+            bg=colors['menu_bg'],
+            fg=colors['menu_fg'],
+            activebackground=colors['active_bg'],
+            activeforeground='white'
+        )
+
+        self.entry_menu.add_command(
+            label="Вырезать",
+            command=lambda: self.focused_entry_event("<<Cut>>")
+        )
+        self.entry_menu.add_command(
+            label="Копировать",
+            command=lambda: self.focused_entry_event("<<Copy>>")
+        )
+        self.entry_menu.add_command(
+            label="Вставить",
+            command=lambda: self.focused_entry_event("<<Paste>>")
+        )
+        self.entry_menu.add_separator()
+        self.entry_menu.add_command(
+            label="Выделить все",
+            command=lambda: self.focused_entry_event("<<SelectAll>>")
+        )
+
+        # Привязываем меню ко всем полям ввода
+        for entry in [self.login_entry, self.regress_entry, self.name_entry, self.link_entry]:
+            entry.bind("<Button-3>", self.show_entry_context_menu)
 
     def show_context_menu(self, event):
         """Показывает контекстное меню"""
@@ -1138,6 +1142,55 @@ class TimeTracker:
                 self.task_context_menu.tk_popup(event.x_root, event.y_root)
         except Exception as e:
             print(f"Ошибка показа меню: {e}")
+
+    def show_task_context_menu(self, event):
+        """Показывает контекстное меню для задачи"""
+        try:
+            item = self.tasks_list.identify_row(event.y)
+            if item:
+                self.tasks_list.selection_set(item)
+                task_id = self.tasks_list.item(item)['values'][0]
+                is_active = self.running_task and self.running_task['id'] == task_id
+
+                # Обновляем состояния пунктов меню
+                self.task_context_menu.entryconfig("Продолжить",
+                                                   state=tk.NORMAL if not self.running_task else tk.DISABLED)
+                self.task_context_menu.entryconfig("Пауза",
+                                                   state=tk.NORMAL if is_active else tk.DISABLED)
+                self.task_context_menu.entryconfig("Редактировать",
+                                                   state=tk.NORMAL)
+                self.task_context_menu.entryconfig("Копировать ссылку",
+                                                   state=tk.NORMAL)
+                self.task_context_menu.entryconfig("Удалить",
+                                                   state=tk.NORMAL)
+
+                try:
+                    self.task_context_menu.tk_popup(event.x_root, event.y_root)
+                finally:
+                    self.task_context_menu.grab_release()
+        except Exception as e:
+            print(f"Ошибка показа меню: {e}")
+
+    def paste_to_focused_entry(self):
+        """Вставляет текст в активное поле ввода"""
+        widget = self.root.focus_get()
+        if isinstance(widget, ttk.Entry):
+            try:
+                text = self.root.clipboard_get()
+                if text:
+                    widget.delete(0, tk.END)
+                    widget.insert(0, text)
+            except tk.TclError:
+                pass
+
+    def show_entry_context_menu(self, event):
+        """Показывает контекстное меню для поля ввода"""
+        widget = event.widget
+        widget.focus_set()  # Активируем поле ввода
+        try:
+            self.entry_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.entry_menu.grab_release()
 
     def edit_selected_task(self):
         """Редактирует выбранную задачу"""
@@ -1232,19 +1285,23 @@ class TimeTracker:
             return {
                 'bg': "#1E1E1E",
                 'fg': "#E0E0E0",
-                'active_bg': "#2D2D2D",
+                'active_bg': "#2D5D7B",  # Изменено для лучшей видимости
                 'button_bg': "#333333",
                 'border': "#3A3A3A",
-                'theme_btn_bg': "#1E1E1E"  # Новый цвет для кнопки темы
+                'theme_btn_bg': "#1E1E1E",
+                'menu_bg': "#2D2D2D",
+                'menu_fg': "#E0E0E0"
             }
         else:
             return {
                 'bg': "#F5F5F5",
                 'fg': "#000000",
-                'active_bg': "#E0E0E0",
+                'active_bg': "#0078D7",  # Синий цвет для светлой темы
                 'button_bg': "#F0F0F0",
                 'border': "#D0D0D0",
-                'theme_btn_bg': "#F5F5F5"  # Новый цвет для кнопки темы
+                'theme_btn_bg': "#F5F5F5",
+                'menu_bg': "#FFFFFF",
+                'menu_fg': "#000000"
             }
 
     def update_theme_button(self):
@@ -1257,6 +1314,41 @@ class TimeTracker:
         )
         # Обновляем фон верхней панели
         self.theme_btn.master.configure(style='TFrame')
+
+    def setup_clipboard_bindings(self):
+        """Настраивает обработку вставки из буфера для всех полей ввода"""
+
+        def handle_paste(event):
+            widget = event.widget
+            if isinstance(widget, ttk.Entry):
+                try:
+                    text = self.root.clipboard_get()
+                    if text:
+                        widget.delete(0, tk.END)
+                        widget.insert(0, text)
+                except tk.TclError:
+                    pass  # В буфере нет текста
+            return "break"  # Предотвращаем стандартное поведение
+
+        # Применяем ко всем Entry виджетам
+        for entry in [self.login_entry, self.regress_entry, self.name_entry, self.link_entry]:
+            entry.bind('<Control-v>', handle_paste)
+            entry.bind('<Command-v>', handle_paste)  # Для MacOS
+
+    def setup_key_bindings(self):
+        """Настройка горячих клавиш для всех полей ввода"""
+
+        def bind_shortcuts(widget):
+            widget.bind("<Control-a>", lambda e: widget.select_range(0, tk.END))
+            widget.bind("<Control-c>", lambda e: widget.event_generate("<<Copy>>"))
+            widget.bind("<Control-v>", lambda e: widget.event_generate("<<Paste>>"))
+            widget.bind("<Control-x>", lambda e: widget.event_generate("<<Cut>>"))
+            widget.bind("<Control-z>", lambda e: widget.event_generate("<<Undo>>"))
+            widget.bind("<Control-y>", lambda e: widget.event_generate("<<Redo>>"))
+
+        # Применяем ко всем Entry виджетам
+        for entry in [self.login_entry, self.regress_entry, self.name_entry, self.link_entry]:
+            bind_shortcuts(entry)
 
 if __name__ == "__main__":
     root = tk.Tk()
