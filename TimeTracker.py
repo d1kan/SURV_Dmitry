@@ -496,13 +496,17 @@ class TimeTracker:
             self.paused_task_id = None
             return
 
-        # Запускаем задачу с сохранённым временем
+        # Получаем сохраненное время задачи из БД
+        saved_time = self.get_task_time(task_id)
+
+        # Запускаем задачу с текущего момента времени
         self.running_task = {
             'id': task_id,
-            'start_time': datetime.now() - timedelta(
-                seconds=self.paused_task_time if task_id == getattr(self, 'paused_task_id', None) else 0
-            )
+            'start_time': datetime.now()
         }
+
+        # Обновляем общее время с учетом сохраненного времени задачи
+        self.total_time += saved_time
 
         self.paused = False
         self.update_tasks()
